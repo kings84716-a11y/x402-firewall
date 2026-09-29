@@ -16,6 +16,13 @@ from .policy import (
     scan_description,
     PROMPT_INJECTION_PATTERNS,
 )
+from .store import Store
+from .gate import (
+    GateResult,
+    PaymentBlockedError,
+    guard_payment,
+    approve,
+)
 
 __all__ = [
     "PaymentRequest",
@@ -26,6 +33,11 @@ __all__ = [
     "evaluate_payment_request",
     "scan_description",
     "PROMPT_INJECTION_PATTERNS",
+    "Store",
+    "GateResult",
+    "PaymentBlockedError",
+    "guard_payment",
+    "approve",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
