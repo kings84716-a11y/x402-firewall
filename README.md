@@ -142,7 +142,7 @@ Rules are evaluated in order; the first hit decides:
 | 4  | `source_url` not http(s) with a host        | DENY             | `bad_source_url`           |
 | 5  | description too long (>4096 chars)          | DENY             | `description_too_long`     |
 | 6  | amount has >6 decimals (sub-cent dust)      | DENY             | `amount_precision`         |
-| 7  | asset/network not USDC/Base                 | DENY             | `asset_network`            |
+| 7  | asset/network not USDC on Base/Base Sepolia  | DENY             | `asset_network`            |
 | 8  | `pay_to` not in `allowed_addresses`         | DENY (or ASK*)   | `unknown_address`          |
 | 9  | `amount > max_amount`                       | DENY             | `over_budget`              |
 | 10 | nonce already seen                          | DENY             | `nonce_replay`             |
@@ -602,3 +602,83 @@ Options:
   JSON object from a file (`-` for stdin).
 - `--fetch-url URL` — fetch a URL live and parse its `payment-required` header
   (one-off verification only; not for routine use).
+
+## Base Sepolia testnet integration (real EIP-3009 signing)
+
+The firewall core stays dependency-free; a separate `integration/` package is
+the only place the official `x402` SDK is imported, to run the full closed loop
+on **Base Sepolia testnet** with a real EIP-3009 `transferWithAuthorization`
+signature and real facilitator `/verify` + `/settle`:
+
+```
+request ─► 402 payment-required ─► OUR wire parser ─► OUR guard_payment
+        ─► (allowed only) x402 SDK EIP-3009 sign ─► free facilitator verify/settle
+        ─► paid resource
+```
+
+The orchestrator (`integration/testnet_runner.py`) is stdlib-only and injectable,
+so the signer/facilitator are **unreachable unless the gate returns allowed** (it
+obtains authorization via `GateResult.signing_authorization()`, which raises
+`PaymentBlockedError` on any blocked verdict).
+
+### Network support
+
+`x402_firewall.policy` now accepts **`Base` and `Base Sepolia`** (case-insensitive)
+as canonical networks (`CANONICAL_NETWORKS`), so a Sepolia-derived request
+(`eip155:84532` → `"Base Sepolia"`) gates cleanly to `PAY`. The store also records
+spend for v2 requests that carry no nonce (empty-string ledger entry; no fabricated
+nonce — replay protection stays on the signed authorization).
+
+### Setup (isolated venv)
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python "x402[evm,httpx]==2.23.0" web3
+```
+
+### Test account + funding (⚠️ needs a human)
+
+```bash
+.venv/bin/python -m integration.create_eoa   # -> address, key in integration/.env.testnet (gitignored)
+.venv/bin/python -m integration.fund_account # -> on-chain balances
+```
+
+The Circle faucet (`https://faucet.circle.com`) requires a browser wallet connect
+and a Google reCAPTCHA, so it **cannot be automated**. Fund the printed address
+with Base Sepolia test USDC there, then re-run `fund_account` to verify the balance
+before the live run. (Base Sepolia test ETH is not required — the facilitator's
+EIP-3009 settlement is gasless for the payer.)
+
+### Live run
+
+```bash
+.venv/bin/python -m integration.live --policy integration/policy.testnet.json
+```
+
+`integration/live.py` starts a local x402 resource server (Base Sepolia USDC,
+`exact` scheme), fetches the real `402`, parses it with `x402_firewall.wire`,
+gates it with `guard_payment`, then (only when allowed) signs EIP-3009 via the
+SDK and calls the free facilitator at `https://x402.org/facilitator`. It prints
+the account + balances, the parsed 402, the gate decision, the facilitator
+verify/settle responses, the tx hash, and the explorer URL.
+
+### Offline wiring tests
+
+`tests/test_testnet_wiring.py` (stdlib-only, no SDK, no funds) asserts the
+wiring with a fake signer/facilitator: DENY → signer never invoked; PAY → signer
+invoked exactly once with the selected v2 option; ASK → no sign until approved.
+
+```bash
+python3 -m unittest discover -s tests   # 148 tests: 142 core + 6 wiring
+```
+
+### Status (2026-09-29)
+
+The full loop is wired and verified live up to the funding boundary: a real
+402 was parsed, gated to `PAY`, a real EIP-3009 signature was produced with the
+throwaway EOA and accepted by the facilitator's `/verify` signature check, which
+then returned `is_valid: false` with reason
+`invalid_exact_evm_insufficient_balance` (`ERC20: transfer amount exceeds
+balance`) because the account holds **0 test USDC**. Funding requires the
+human-driven Circle faucet; once funded, re-running `integration.live` completes
+`/settle` and emits a verifiable Base Sepolia tx hash.

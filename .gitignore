@@ -2,3 +2,14 @@ __pycache__/
 *.pyc
 *.pyo
 *.db
+
+# Integration virtualenv (SDK lives here; core firewall stays stdlib-only)
+.venv/
+
+# Testnet secrets (throwaway Base Sepolia EOA private key + env)
+.env.testnet
+integration/.env.testnet
+
+# Live-run scratch files
+integration/*.db
+integration/__pycache__/

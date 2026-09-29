@@ -147,11 +147,16 @@ class Store:
     def record_spend(
         self, amount: float, asset: str, network: str, pay_to: str, payee: str, nonce: str
     ) -> None:
-        """Append a spend ledger row."""
+        """Append a spend ledger row.
+
+        The ``nonce`` column is ``NOT NULL``; v2-derived requests legitimately
+        carry no nonce (replay protection happens on the signed authorization),
+        so a ``None`` nonce is recorded as the empty string in the ledger.
+        """
         self._conn.execute(
             "INSERT INTO spend (amount, asset, network, pay_to, payee, nonce, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (amount, asset, network, pay_to, payee, nonce, _now()),
+            (amount, asset, network, pay_to, payee, nonce if nonce is not None else "", _now()),
         )
 
     def total_spent(self) -> float:
@@ -203,7 +208,15 @@ class Store:
             self._conn.execute(
                 "INSERT INTO spend (amount, asset, network, pay_to, payee, nonce, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (amount, asset, network, pay_to, payee, nonce, _now()),
+                (
+                    amount,
+                    asset,
+                    network,
+                    pay_to,
+                    payee,
+                    nonce if nonce is not None else "",
+                    _now(),
+                ),
             )
             self._conn.execute("COMMIT")
             return True, None, 0.0

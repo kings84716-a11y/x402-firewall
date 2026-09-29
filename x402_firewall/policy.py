@@ -28,6 +28,10 @@ AMOUNT_EPSILON = 1e-9
 
 CANONICAL_ASSET = "usdc"
 CANONICAL_NETWORK = "base"
+# Accepted networks (case-insensitive). The MVP originally allowed only Base
+# mainnet; "Base Sepolia" is the testnet used for live (test-only) flows, whose
+# CAIP-2 id ``eip155:84532`` normalizes to the name "Base Sepolia".
+CANONICAL_NETWORKS = frozenset({"base", "base sepolia"})
 
 # USDC has 6 decimals on-chain; amounts with sub-cent dust (more than 6
 # significant decimals) cannot be represented on-chain and are rejected.
@@ -412,11 +416,11 @@ def evaluate_payment_request(
     # Rule 7: asset/network mismatch (case-insensitive).
     asset = req.asset.strip().lower()
     network = req.network.strip().lower()
-    if asset != CANONICAL_ASSET or network != CANONICAL_NETWORK:
+    if asset != CANONICAL_ASSET or network not in CANONICAL_NETWORKS:
         return Result(
             Verdict.DENY,
             f"unsupported asset/network '{req.asset}' on '{req.network}' "
-            f"(only USDC on Base is allowed)",
+            f"(only USDC on Base or Base Sepolia is allowed)",
             "asset_network",
         )
 
