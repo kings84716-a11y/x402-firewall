@@ -4,12 +4,14 @@ Modes:
 
 * guard a payment request (default) — evaluate via the signing gate, print a
   JSON result including ``allowed``, and exit with a code scripts can branch on:
-      * 0  -> allowed (PAY, or ASK auto-approved)
+      * 0  -> allowed (PAY, or ASK auto-approved / human-approved)
       * 1  -> DENY (hard denial)
       * 3  -> ASK (needs human approval)
+      * 4  -> ASK rejected by a human (``--interactive`` only)
       * 2  -> usage / config error
 * report spend — with ``--report``, print the cumulative spent total.
 * dump audit trail — with ``--audit``, print the decision rows as JSON.
+* run a simulated end-to-end demo — with ``--demo SCENARIO``.
 
 The store is a SQLite file (default ``x402_firewall.db``); pass ``--db :memory:``
 to keep everything in-memory (no file is created).
@@ -22,16 +24,20 @@ import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from functools import partial
 from typing import Optional, Sequence
 
 from .models import Verdict
 from .policy import PolicyConfig
 from .store import Store
-from .gate import guard_payment
+from .gate import guard_payment, approve
+from .interactive import interactive_approve
+from .demo import run_demo
 
 EXIT_OK = 0
 EXIT_DENY = 1
 EXIT_ASK = 3
+EXIT_REJECTED = 4
 
 
 def _load_json(path: Optional[str], stream) -> object:
@@ -48,6 +54,33 @@ def _now() -> str:
 def _write_jsonl(path: str, entry: dict) -> None:
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def _demo_exit_code(outcome: dict) -> int:
+    """Map a demo outcome status to a CLI exit code mirroring the guard codes."""
+    status = outcome.get("status")
+    if status in ("paid", "not_required"):
+        return EXIT_OK
+    if status == "blocked":
+        return EXIT_DENY
+    if status == "rejected":
+        return EXIT_REJECTED
+    return EXIT_ASK  # awaiting
+
+
+def _run_demo(args, store: Store) -> int:
+    """Run a simulated end-to-end demo scenario and print the outcome as JSON."""
+    approval_handler = None
+    if args.interactive:
+        approval_handler = partial(
+            interactive_approve, input_stream=sys.stdin, output_stream=sys.stderr
+        )
+    elif args.approve:
+        approval_handler = approve
+
+    summary = run_demo(args.demo, store=store, approval_handler=approval_handler)
+    print(json.dumps(summary, sort_keys=True))
+    return _demo_exit_code(summary["outcome"])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -95,6 +128,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="auto-approve ASK verdicts (bypasses the human-approval gate)",
     )
+    approval_group = parser.add_mutually_exclusive_group()
+    approval_group.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="on an ASK verdict, prompt a human on the terminal to approve or "
+        "reject (approved -> exit 0, rejected -> exit 4)",
+    )
+    approval_group.add_argument(
+        "--approve",
+        action="store_true",
+        help="deterministically approve an ASK verdict (equivalent to answering "
+        "yes), for reviewed scripting/automation",
+    )
     parser.add_argument(
         "--signed",
         metavar="PATH",
@@ -137,6 +184,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="append one JSON line per decision to this file (append-only JSONL)",
     )
+    parser.add_argument(
+        "--demo",
+        metavar="SCENARIO",
+        choices=["clean", "injected", "malicious"],
+        default=None,
+        help="run a simulated end-to-end demo scenario instead of guarding a "
+        "single request (combine with --approve or --interactive to approve an "
+        "ASK scenario)",
+    )
     return parser
 
 
@@ -159,6 +215,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             rows = store.list_decisions(limit=args.limit, verdict=args.verdict)
             print(json.dumps(rows, sort_keys=True))
             return EXIT_OK
+
+        if args.demo is not None:
+            return _run_demo(args, store)
 
         try:
             policy = PolicyConfig.from_dict(_load_json(args.policy, sys.stdin))
@@ -201,6 +260,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except (ValueError, TypeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+
+        if args.interactive and gate_result.result.decision is Verdict.ASK:
+            gate_result = interactive_approve(
+                gate_result, input_stream=sys.stdin, output_stream=sys.stderr
+            )
+            if not gate_result.allowed:
+                print(json.dumps(gate_result.to_dict(), sort_keys=True))
+                return EXIT_REJECTED
+        elif args.approve and gate_result.result.decision is Verdict.ASK:
+            gate_result = approve(gate_result)
 
         if args.log is not None:
             try:

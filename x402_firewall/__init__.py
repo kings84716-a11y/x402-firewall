@@ -28,6 +28,23 @@ from .gate import (
     guard_payment,
     approve,
 )
+from .interactive import interactive_approve, format_summary, MAX_PROMPTS
+from .client import (
+    Client,
+    InMemoryServer,
+    FakeSettler,
+    Transport,
+    Settler,
+    TransportResponse,
+    ClientOutcome,
+    ApprovalHandler,
+    STATUS_NOT_REQUIRED,
+    STATUS_PAID,
+    STATUS_BLOCKED,
+    STATUS_REJECTED,
+    STATUS_AWAITING,
+)
+from .demo import run_demo, build_client, SCENARIOS
 
 __all__ = [
     "PaymentRequest",
@@ -48,6 +65,25 @@ __all__ = [
     "PaymentBlockedError",
     "guard_payment",
     "approve",
+    "interactive_approve",
+    "format_summary",
+    "MAX_PROMPTS",
+    "Client",
+    "InMemoryServer",
+    "FakeSettler",
+    "Transport",
+    "Settler",
+    "TransportResponse",
+    "ClientOutcome",
+    "ApprovalHandler",
+    "STATUS_NOT_REQUIRED",
+    "STATUS_PAID",
+    "STATUS_BLOCKED",
+    "STATUS_REJECTED",
+    "STATUS_AWAITING",
+    "run_demo",
+    "build_client",
+    "SCENARIOS",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

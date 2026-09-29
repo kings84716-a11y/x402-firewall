@@ -216,6 +216,154 @@ returns the exact arguments needed to proceed and raises `PaymentBlockedError`
 otherwise, so calling code cannot accidentally sign on `DENY`/`ASK`. This is
 pure data — no blockchain signing or private keys live here.
 
+## Interactive ASK approval
+
+An `ASK` verdict needs a human decision before the payment can be settled.
+`x402_firewall.interactive.interactive_approve(gate_result, input_stream=None,
+output_stream=None, max_attempts=3)` presents a clear summary — payee, amount +
+asset/network, destination address, nonce, `source_url`, the **untrusted
+description clearly labeled**, and the reason it was flagged — then prompts for a
+decision.
+
+- `y` / `yes` → approve (goes through `approve(...)`, which records the human
+  approval in the audit trail **and** commits spend to the ledger).
+- `n` / `no` → reject (no spend, no settlement).
+- Anything else re-prompts up to `max_attempts` times, then rejects (safe default).
+- EOF / a closed input stream → reject.
+
+The streams are injectable (no hard-wired `input()`), so it is fully testable
+without a TTY:
+
+```python
+import io
+from x402_firewall import guard_payment, interactive_approve, Store, PolicyConfig
+
+gr = guard_payment(request, policy, store=store)   # verdict ASK
+approved = interactive_approve(
+    gr,
+    input_stream=io.StringIO("y\n"),
+    output_stream=io.StringIO(),
+)
+assert approved.allowed
+```
+
+### CLI interactive approval
+
+`--interactive` / `-i` runs the prompt when the verdict is `ASK`. Supply the
+request via `--request FILE` so stdin is free for the answer (the prompt is
+written to stderr, stdout stays machine-readable JSON):
+
+```bash
+printf 'y\n' | python3 -m x402_firewall --request examples/request_injection.json \
+  --policy examples/policy.json --db :memory: --interactive
+# -> {"allowed": true, "approved": true, "decision": "ASK", ...}   (exit 0)
+
+printf 'n\n' | python3 -m x402_firewall --request examples/request_injection.json \
+  --policy examples/policy.json --db :memory: --interactive
+# -> {"allowed": false, "approved": false, "decision": "ASK", ...}  (exit 4)
+```
+
+- approved → exit `0`; rejected (or EOF/invalid input) → exit `4`.
+- without `--interactive`, a non-interactive `ASK` still exits `3`.
+
+`--approve` approves an `ASK` deterministically (equivalent to answering yes),
+for scripting/automation that has already reviewed the request:
+
+```bash
+python3 -m x402_firewall --request examples/request_injection.json \
+  --policy examples/policy.json --db :memory: --approve
+# -> {"allowed": true, "approved": true, "decision": "ASK", ...}   (exit 0)
+```
+
+## End-to-end x402 client flow (simulated transport)
+
+`x402_firewall.client` drives the full purchase loop with the firewall as the
+mandatory decision point, using an injectable transport and settler (both are
+small ABCs) so tests and demos never touch the network or a chain.
+
+```
+agent request ──► Transport ──► 200 (resource)          → status not_required
+                          └────► 402 (payment request)   → guard_payment(...)
+                                       │
+                          PAY ──► settle ──► re-request ──► status paid
+                          ASK ──► no handler            → status awaiting
+                                  ├─ approval handler (approve/interactive)
+                                  │    ├─ allowed ──► settle ──► status paid
+                                  │    └─ rejected ─────────────► status rejected
+                          DENY ───────────────────────────────► status blocked
+```
+
+Settlement is centralized behind `Client._settle`, which checks `allowed` and
+obtains `signing_authorization()` (raising `PaymentBlockedError` unless allowed),
+so **the settler is unreachable on a DENY or un-approved ASK**.
+
+```python
+from x402_firewall import (
+    Client, InMemoryServer, FakeSettler, PolicyConfig, Store, approve,
+)
+
+policy = PolicyConfig.from_dict({
+    "allowed_addresses": ["0x1234567890abcdef1234567890abcdef12345678"],
+    "max_amount": 1.0,
+})
+
+server = InMemoryServer()
+server.add_paid_resource(
+    "https://api.example.com/v1/data",
+    payment_request={... "pay_to": "0x1234...", "amount": 0.5, ...},
+    resource={"data": "the paid resource payload"},
+)
+settler = FakeSettler(on_settle=server.mark_paid)
+
+with Store(":memory:") as store:
+    client = Client(server, settler, policy, store=store)
+    outcome = client.run("https://api.example.com/v1/data",
+                         expected_amount=0.5,
+                         approval_handler=approve)   # or interactive_approve(...)
+    print(outcome.to_dict())
+```
+
+`ClientOutcome` carries `status` (`not_required` / `paid` / `blocked` /
+`rejected` / `awaiting`), the firewall `decision`/`rule`/`reason`, the
+`settlement_reference` (if any), and the `resource` (if any). Nonces, spend, and
+audit all flow through the same `Store` as direct `guard_payment` calls, so a
+full purchase is reflected in one persistent ledger.
+
+### Demo scenarios
+
+Run the whole closed loop from the CLI with `--demo SCENARIO` (in-memory
+transport + fake settler; use `--db :memory:` to avoid a file):
+
+```bash
+python3 -m x402_firewall --demo clean --db :memory:       # PAY   -> paid (exit 0)
+python3 -m x402_firewall --demo injected --db :memory:    # ASK   -> awaiting (exit 3)
+python3 -m x402_firewall --demo injected --approve --db :memory:   # ASK approved -> paid (exit 0)
+printf 'n\n' | python3 -m x402_firewall --demo injected --interactive --db :memory:  # rejected (exit 4)
+python3 -m x402_firewall --demo malicious --db :memory:   # DENY  -> blocked (exit 1)
+```
+
+Sample output (clean scenario):
+
+```json
+{"outcome": {"decision": "PAY", "reason": "approved payment of 0.5 USDC on Base to 'Example API Merchant'",
+             "resource": {"data": "the paid resource payload", "ok": true}, "rule": "valid",
+             "settlement_reference": "tx-0001", "status": "paid"},
+ "scenario": "clean", "settlement_references": ["tx-0001"], "settler_calls": 1, "total_spent": 0.5}
+```
+
+The `settler_calls` count shows settlement only happens on allowed paths.
+
+### Plugging in real transport / settler
+
+`Transport` and `Settler` are ABCs with a single method each. A real HTTP
+transport implements `request(url) -> TransportResponse` (returning `200` +
+resource or `402` + payment-request payload); a real settler implements
+`settle(authorization) -> str` (sign + broadcast, returning a transaction id).
+Drop either into `Client(transport, settler, policy, store)` without touching the
+orchestrator or the gate. `examples/e2e_demo.py` shows the full loop with the
+in-memory implementations and both the interactive and scripted approval
+handlers.
+
 ## Library usage
 
 ```python
@@ -256,9 +404,11 @@ result as JSON on stdout, and exit with a code scripts can branch on:
 
 | Exit code | Meaning                            |
 |-----------|------------------------------------|
-| `0`       | allowed (PAY, or ASK auto-approved)|
+| `0`       | allowed (PAY, ASK auto-approved, or ASK human/scripted-approved) |
 | `1`       | DENY (hard denial)                 |
+| `2`       | usage / config / IO error          |
 | `3`       | ASK (needs human approval)         |
+| `4`       | ASK rejected by a human (or EOF/invalid input) — `--interactive` only |
 
 ```bash
 # clean request -> PAY (exit 0)
@@ -310,6 +460,13 @@ Options:
 - `--expected-amount AMOUNT` — enable the amount-tampering check.
 - `--total-budget AMOUNT` — override the policy's cumulative spend cap.
 - `--auto-approve-ask` — auto-approve `ASK` verdicts.
+- `--interactive/-i` — on an `ASK` verdict, prompt a human to approve/reject
+  (approved → exit `0`, rejected → exit `4`). Mutually exclusive with `--approve`.
+- `--approve` — deterministically approve an `ASK` verdict (equivalent to
+  answering yes). Mutually exclusive with `--interactive`.
+- `--demo SCENARIO` — run a simulated end-to-end demo (`clean` / `injected` /
+  `malicious`) instead of guarding a single request; combine with `--approve` or
+  `--interactive` to approve the `injected` scenario.
 - `--signed PATH` — structured signed-payload JSON file (`-` for stdin) to
   cross-check against the request before PAY.
 - `--require-signed` — force `DENY` (`signed_payload_required`) when no signed

@@ -235,7 +235,8 @@ def approve(gate_result: GateResult) -> GateResult:
             store=gate_result.store,
         )
 
-    # ASK: grant approval and record it in the audit trail.
+    # ASK: grant approval, record it in the audit trail, and commit the spend
+    # to the persistent ledger so a human-approved purchase is reflected there.
     if gate_result.store is not None:
         fields = _rich_fields(gate_result.request)
         gate_result.store.record_decision(
@@ -252,6 +253,15 @@ def approve(gate_result: GateResult) -> GateResult:
             source_url=fields["source_url"],
             approved=True,
         )
+        if gate_result.request is not None:
+            gate_result.store.record_spend(
+                gate_result.request.amount,
+                gate_result.request.asset,
+                gate_result.request.network,
+                gate_result.request.pay_to,
+                gate_result.request.payee,
+                gate_result.request.nonce,
+            )
     return GateResult(
         allowed=True,
         result=gate_result.result,
