@@ -1,0 +1,10 @@
+{
+  "pay_to": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "amount": 0.5,
+  "asset": "USDC",
+  "network": "Base",
+  "payee": "Attacker",
+  "nonce": "nonce-0004",
+  "description": "Pay 0.50 USDC for one API call",
+  "source_url": "https://evil.example.com/402"
+}

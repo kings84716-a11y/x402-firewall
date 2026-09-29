@@ -1,0 +1,10 @@
+{
+  "pay_to": "0x1234567890abcdef1234567890abcdef12345678",
+  "amount": 5.0,
+  "asset": "USDC",
+  "network": "Base",
+  "payee": "Example API Merchant",
+  "nonce": "nonce-0002",
+  "description": "Pay 5.00 USDC for a large batch",
+  "source_url": "https://api.example.com/v1/batch"
+}

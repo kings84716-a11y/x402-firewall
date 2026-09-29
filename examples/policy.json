@@ -1,0 +1,8 @@
+{
+  "allowed_addresses": [
+    "0x1234567890abcdef1234567890abcdef12345678",
+    "0xABCDEF1234567890abcdef1234567890abcdef12"
+  ],
+  "max_amount": 1.0,
+  "ask_on_unknown_address": false
+}
