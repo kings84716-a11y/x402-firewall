@@ -9,11 +9,16 @@ from .models import (
     Verdict,
     Result,
     MalformedRequestError,
+    SignedPayload,
+    is_valid_evm_address,
 )
 from .policy import (
     PolicyConfig,
     evaluate_payment_request,
     scan_description,
+    cross_check_signed_payload,
+    is_valid_source_url,
+    has_excess_precision,
     PROMPT_INJECTION_PATTERNS,
 )
 from .store import Store
@@ -29,9 +34,14 @@ __all__ = [
     "Verdict",
     "Result",
     "MalformedRequestError",
+    "SignedPayload",
+    "is_valid_evm_address",
     "PolicyConfig",
     "evaluate_payment_request",
     "scan_description",
+    "cross_check_signed_payload",
+    "is_valid_source_url",
+    "has_excess_precision",
     "PROMPT_INJECTION_PATTERNS",
     "Store",
     "GateResult",
@@ -40,4 +50,4 @@ __all__ = [
     "approve",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

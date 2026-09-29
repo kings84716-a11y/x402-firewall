@@ -1,0 +1,10 @@
+{
+  "pay_to": "0x1234567890abcdef1234567890abcdef12345678",
+  "amount": 0.5,
+  "asset": "USDC",
+  "network": "Base",
+  "payee": "Example API Merchant",
+  "nonce": "nonce-bad-url",
+  "description": "Pay 0.50 USDC for one API call",
+  "source_url": "javascript:alert(1)"
+}

@@ -5,5 +5,6 @@
   ],
   "max_amount": 1.0,
   "total_budget": 10.0,
-  "ask_on_unknown_address": false
+  "ask_on_unknown_address": false,
+  "require_signed_payload": false
 }

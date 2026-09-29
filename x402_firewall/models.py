@@ -6,6 +6,8 @@ This module is dependency-free and uses only the Python standard library.
 from __future__ import annotations
 
 import enum
+import math
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -23,6 +25,102 @@ class MalformedRequestError(ValueError):
 
 
 _REQUIRED_STRING_FIELDS = ("pay_to", "asset", "network", "payee", "nonce", "source_url")
+
+# An EVM address must look like ``0x`` + 40 hex chars. EIP-55 mixed-case as
+# well as all-lower/all-upper are accepted (checksum is not verified here).
+_EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def is_valid_evm_address(value: Any) -> bool:
+    """Return True if ``value`` looks like a valid EVM (Base) address."""
+    return isinstance(value, str) and _EVM_ADDRESS_RE.match(value) is not None
+
+
+def _parse_uint(value: Any) -> Optional[int]:
+    """Parse an on-chain integer amount (int or digit-only string).
+
+    Returns ``None`` on anything else (including bool, floats, negatives).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if s.isdigit():
+            return int(s)
+    return None
+
+
+@dataclass(frozen=True)
+class SignedPayload:
+    """A structured representation of the signed (EIP-712-style) payload.
+
+    Pure data — no crypto, no signatures. It carries the fields that must stay
+    consistent with the validated request:
+
+        recipient:  destination address (must equal request.pay_to).
+        amount_raw: integer amount in base units (the on-chain integer form).
+        decimals:   token decimals used to convert amount_raw to human units
+                    (default 6 for USDC).
+        asset:      optional asset symbol (must equal request.asset).
+        network:    optional chain/network id (must equal request.network).
+        nonce:      optional nonce carried in the signed payload.
+    """
+
+    recipient: str
+    amount_raw: int
+    decimals: int = 6
+    asset: Optional[str] = None
+    network: Optional[str] = None
+    nonce: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "SignedPayload":
+        """Build a SignedPayload from a JSON-decoded object, validating shape."""
+        if not isinstance(data, dict):
+            raise MalformedRequestError("signed payload must be a JSON object")
+
+        recipient = data.get("recipient")
+        if not isinstance(recipient, str) or not recipient.strip():
+            raise MalformedRequestError(
+                "signed payload 'recipient' must be a non-empty string"
+            )
+
+        if "amount_raw" not in data:
+            raise MalformedRequestError("signed payload missing 'amount_raw'")
+        amount_raw = _parse_uint(data["amount_raw"])
+        if amount_raw is None:
+            raise MalformedRequestError(
+                "signed payload 'amount_raw' must be an integer or digit-only string"
+            )
+
+        decimals = data.get("decimals", 6)
+        if isinstance(decimals, bool) or not isinstance(decimals, int) or decimals < 0:
+            raise MalformedRequestError(
+                "signed payload 'decimals' must be a non-negative integer"
+            )
+
+        asset = data.get("asset")
+        if asset is not None and not isinstance(asset, str):
+            raise MalformedRequestError("signed payload 'asset' must be a string")
+
+        network = data.get("network", data.get("chain"))
+        if network is not None and not isinstance(network, str):
+            raise MalformedRequestError("signed payload 'network' must be a string")
+
+        nonce = data.get("nonce")
+        if nonce is not None and not isinstance(nonce, str):
+            raise MalformedRequestError("signed payload 'nonce' must be a string")
+
+        return cls(
+            recipient=recipient,
+            amount_raw=amount_raw,
+            decimals=decimals,
+            asset=asset,
+            network=network,
+            nonce=nonce,
+        )
 
 
 @dataclass(frozen=True)
@@ -73,6 +171,8 @@ class PaymentRequest:
             raise MalformedRequestError(
                 f"field 'amount' must be a number, got {type(amount).__name__}"
             )
+        if not math.isfinite(float(amount)):
+            raise MalformedRequestError(f"amount must be finite, got {amount}")
         if amount <= 0:
             raise MalformedRequestError(f"amount must be > 0, got {amount}")
 

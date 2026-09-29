@@ -50,15 +50,45 @@ CREATE TABLE IF NOT EXISTS decisions (
     pay_to              TEXT,
     payee               TEXT,
     nonce               TEXT,
+    asset               TEXT,
+    network             TEXT,
+    source_url          TEXT,
+    signed_payload_present INTEGER NOT NULL DEFAULT 0,
+    decision_duration_ms   INTEGER,
     approved            INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL
 );
 """
 
+# Additive columns for the ``decisions`` audit table. Column names/types come
+# from this hardcoded constant map (never user input); values are always bound
+# as parameters. New databases get them from ``_SCHEMA`` above; existing
+# databases get them via idempotent ``ALTER TABLE ... ADD COLUMN``.
+_DECISION_ADDITIVE_COLUMNS = {
+    "asset": "TEXT",
+    "network": "TEXT",
+    "source_url": "TEXT",
+    "signed_payload_present": "INTEGER NOT NULL DEFAULT 0",
+    "decision_duration_ms": "INTEGER",
+}
+
 
 def _now() -> str:
     """Return a UTC ISO-8601 timestamp string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply additive schema migrations idempotently.
+
+    Adds any missing audit columns to existing databases so old DBs keep
+    opening after a code upgrade. Column names/types are drawn from the
+    hardcoded ``_DECISION_ADDITIVE_COLUMNS`` map, never from user input.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(decisions)")}
+    for column, decl in _DECISION_ADDITIVE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE decisions ADD COLUMN {column} {decl}")
 
 
 class Store:
@@ -78,6 +108,7 @@ class Store:
         self._conn.isolation_level = None  # autocommit; we manage transactions.
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        _migrate(self._conn)
 
     # -- lifecycle ----------------------------------------------------------
     def close(self) -> None:
@@ -193,13 +224,19 @@ class Store:
         payee: Optional[str],
         nonce: Optional[str],
         approved: bool = False,
+        asset: Optional[str] = None,
+        network: Optional[str] = None,
+        source_url: Optional[str] = None,
+        signed_payload_present: bool = False,
+        decision_duration_ms: Optional[int] = None,
     ) -> None:
         """Append an audit row describing one gate decision."""
         self._conn.execute(
             "INSERT INTO decisions "
             "(request_fingerprint, verdict, rule, reason, amount, pay_to, payee, "
-            " nonce, approved, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " nonce, asset, network, source_url, signed_payload_present, "
+            " decision_duration_ms, approved, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 request_fingerprint,
                 verdict,
@@ -209,6 +246,11 @@ class Store:
                 pay_to,
                 payee,
                 nonce,
+                asset,
+                network,
+                source_url,
+                1 if signed_payload_present else 0,
+                decision_duration_ms,
                 1 if approved else 0,
                 _now(),
             ),
@@ -217,7 +259,36 @@ class Store:
     def decisions(self):
         """Return all audit rows, oldest first, as a list of dicts."""
         rows = self._conn.execute(
-            "SELECT id, request_fingerprint, verdict, rule, reason, amount, "
-            "pay_to, payee, nonce, approved, created_at FROM decisions ORDER BY id"
+            "SELECT * FROM decisions ORDER BY id"
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_decisions(
+        self,
+        limit: Optional[int] = None,
+        verdict: Optional[str] = None,
+        since: Optional[str] = None,
+    ):
+        """Return audit rows, newest first, optionally filtered.
+
+        ``limit`` caps the row count; ``verdict`` filters by PAY/ASK/DENY;
+        ``since`` is an ISO-8601 timestamp (rows at or after it). All filter
+        values are bound as SQL parameters (no string interpolation).
+        """
+        clauses = []
+        params: list = []
+        if verdict is not None:
+            clauses.append("verdict = ?")
+            params.append(verdict)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        sql = "SELECT * FROM decisions"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]

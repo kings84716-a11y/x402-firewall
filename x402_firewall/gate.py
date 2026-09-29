@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
@@ -66,6 +67,29 @@ def _safe_fields(request: Any):
     return None, None, None, None
 
 
+def _rich_fields(request: Any) -> dict:
+    """Defensively extract all audit fields, tolerating malformed input."""
+    amount, pay_to, payee, nonce = _safe_fields(request)
+    fields = {
+        "amount": amount,
+        "pay_to": pay_to,
+        "payee": payee,
+        "nonce": nonce,
+        "asset": None,
+        "network": None,
+        "source_url": None,
+    }
+    if isinstance(request, PaymentRequest):
+        fields["asset"] = request.asset
+        fields["network"] = request.network
+        fields["source_url"] = request.source_url
+    elif isinstance(request, dict):
+        fields["asset"] = request.get("asset") if isinstance(request.get("asset"), str) else None
+        fields["network"] = request.get("network") if isinstance(request.get("network"), str) else None
+        fields["source_url"] = request.get("source_url") if isinstance(request.get("source_url"), str) else None
+    return fields
+
+
 @dataclass
 class GateResult:
     """The outcome of the signing gate.
@@ -110,19 +134,30 @@ class GateResult:
         }
 
 
-def _audit(store: Optional[Store], gr: "GateResult", fingerprint: str) -> None:
+def _audit(
+    store: Optional[Store],
+    gr: "GateResult",
+    fingerprint: str,
+    signed_payload_present: bool = False,
+    decision_duration_ms: Optional[int] = None,
+) -> None:
     if store is None:
         return
-    amount, pay_to, payee, nonce = _safe_fields(gr.request)
+    fields = _rich_fields(gr.request)
     store.record_decision(
         request_fingerprint=fingerprint,
         verdict=gr.result.decision.value,
         rule=gr.result.rule,
         reason=gr.result.reason,
-        amount=amount,
-        pay_to=pay_to,
-        payee=payee,
-        nonce=nonce,
+        amount=fields["amount"],
+        pay_to=fields["pay_to"],
+        payee=fields["payee"],
+        nonce=fields["nonce"],
+        asset=fields["asset"],
+        network=fields["network"],
+        source_url=fields["source_url"],
+        signed_payload_present=signed_payload_present,
+        decision_duration_ms=decision_duration_ms,
         approved=gr.approved,
     )
 
@@ -133,13 +168,25 @@ def guard_payment(
     store: Optional[Store] = None,
     expected_amount: Optional[float] = None,
     auto_approve_ask: bool = False,
+    signed_payload: Optional[Union[dict, Any]] = None,
 ) -> GateResult:
     """Evaluate a request and enforce the signing-gate contract.
 
     Returns a :class:`GateResult` with an unambiguous ``allowed`` flag. Every
     decision (PAY/ASK/DENY) is persisted to ``store``'s audit table.
+
+    ``signed_payload`` (optional) is cross-checked for consistency with the
+    request fields before PAY is allowed.
     """
-    result = evaluate_payment_request(request, policy, expected_amount, store=store)
+    start = time.perf_counter()
+    result = evaluate_payment_request(
+        request,
+        policy,
+        expected_amount,
+        store=store,
+        signed_payload=signed_payload,
+    )
+    decision_duration_ms = int((time.perf_counter() - start) * 1000)
 
     try:
         req = _coerce_request(request)
@@ -163,7 +210,13 @@ def guard_payment(
         approved=approved,
         store=store,
     )
-    _audit(store, gr, _fingerprint(request))
+    _audit(
+        store,
+        gr,
+        _fingerprint(request),
+        signed_payload_present=signed_payload is not None,
+        decision_duration_ms=decision_duration_ms,
+    )
     return gr
 
 
@@ -184,16 +237,19 @@ def approve(gate_result: GateResult) -> GateResult:
 
     # ASK: grant approval and record it in the audit trail.
     if gate_result.store is not None:
-        amount, pay_to, payee, nonce = _safe_fields(gate_result.request)
+        fields = _rich_fields(gate_result.request)
         gate_result.store.record_decision(
             request_fingerprint=_fingerprint(gate_result.request),
             verdict="ASK",
             rule=gate_result.result.rule,
             reason=gate_result.result.reason,
-            amount=amount,
-            pay_to=pay_to,
-            payee=payee,
-            nonce=nonce,
+            amount=fields["amount"],
+            pay_to=fields["pay_to"],
+            payee=fields["payee"],
+            nonce=fields["nonce"],
+            asset=fields["asset"],
+            network=fields["network"],
+            source_url=fields["source_url"],
             approved=True,
         )
     return GateResult(

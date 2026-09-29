@@ -1,0 +1,8 @@
+{
+  "recipient": "0x000000000000000000000000000000000000dead",
+  "amount_raw": "500000",
+  "decimals": 6,
+  "asset": "USDC",
+  "network": "Base",
+  "nonce": "nonce-0001"
+}
