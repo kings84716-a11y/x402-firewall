@@ -23,16 +23,28 @@ import argparse
 import json
 import sqlite3
 import sys
+from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import partial
 from typing import Optional, Sequence
 
-from .models import Verdict
-from .policy import PolicyConfig
+from .models import Verdict, MalformedRequestError
+from .policy import PolicyConfig, evaluate_payment_request
 from .store import Store
 from .gate import guard_payment, approve
 from .interactive import interactive_approve
 from .demo import run_demo
+from .wire import (
+    WireError,
+    WireFetchError,
+    UnsupportedSchemeError,
+    UnknownAssetError,
+    NoMatchingOptionError,
+    parse_payment_required_header,
+    parse_payment_required_json,
+    fetch_payment_required,
+    normalize_v2,
+)
 
 EXIT_OK = 0
 EXIT_DENY = 1
@@ -45,6 +57,13 @@ def _load_json(path: Optional[str], stream) -> object:
         return json.load(stream)
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _read_text(path: str, stream) -> str:
+    if path == "-":
+        return stream.read()
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
 
 
 def _now() -> str:
@@ -81,6 +100,79 @@ def _run_demo(args, store: Store) -> int:
     summary = run_demo(args.demo, store=store, approval_handler=approval_handler)
     print(json.dumps(summary, sort_keys=True))
     return _demo_exit_code(summary["outcome"])
+
+
+def _emit_v2_deny(reason: str, rule: str) -> int:
+    print(
+        json.dumps(
+            {
+                "normalized_request": None,
+                "decision": "DENY",
+                "reason": reason,
+                "rule": rule,
+            },
+            sort_keys=True,
+        )
+    )
+    return EXIT_DENY
+
+
+def _load_v2_payload(args):
+    """Read the raw v2 payload from a header file, decoded JSON, or a live fetch."""
+    if args.payment_required_header is not None:
+        return parse_payment_required_header(_read_text(args.payment_required_header, sys.stdin))
+    if args.payment_required_json is not None:
+        return parse_payment_required_json(_load_json(args.payment_required_json, sys.stdin))
+    return fetch_payment_required(args.fetch_url)
+
+
+def _run_v2(args, policy) -> int:
+    """Parse a real x402 v2 payload, normalize it, and evaluate it.
+
+    Prints the normalized internal request plus the gate decision as JSON and
+    exits with the same codes as the guard path (PAY 0 / DENY 1 / ASK 3 / error
+    2).
+    """
+    try:
+        pr = _load_v2_payload(args)
+    except WireFetchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"error: failed to load payment-required payload: {exc}", file=sys.stderr)
+        return 2
+    except (WireError, MalformedRequestError) as exc:
+        return _emit_v2_deny(str(exc), "malformed")
+
+    try:
+        request = normalize_v2(pr)
+    except UnsupportedSchemeError as exc:
+        return _emit_v2_deny(str(exc), "unsupported_scheme")
+    except UnknownAssetError as exc:
+        return _emit_v2_deny(str(exc), "unsupported_asset")
+    except NoMatchingOptionError as exc:
+        return _emit_v2_deny(str(exc), "no_matching_option")
+    except MalformedRequestError as exc:
+        return _emit_v2_deny(str(exc), "malformed")
+
+    result = evaluate_payment_request(request, policy, args.expected_amount)
+    print(
+        json.dumps(
+            {
+                "normalized_request": asdict(request),
+                "decision": result.decision.value,
+                "reason": result.reason,
+                "rule": result.rule,
+            },
+            sort_keys=True,
+        )
+    )
+
+    if result.decision is Verdict.PAY:
+        return EXIT_OK
+    if result.decision is Verdict.ASK:
+        return EXIT_ASK
+    return EXIT_DENY
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -193,6 +285,28 @@ def build_parser() -> argparse.ArgumentParser:
         "single request (combine with --approve or --interactive to approve an "
         "ASK scenario)",
     )
+    v2_group = parser.add_mutually_exclusive_group()
+    v2_group.add_argument(
+        "--payment-required-header",
+        metavar="PATH",
+        default=None,
+        help="parse a real x402 v2 'payment-required' header value (base64) from "
+        "a file, or '-' for stdin",
+    )
+    v2_group.add_argument(
+        "--payment-required-json",
+        metavar="PATH",
+        default=None,
+        help="parse an already-decoded x402 v2 payment-required JSON object from "
+        "a file, or '-' for stdin",
+    )
+    v2_group.add_argument(
+        "--fetch-url",
+        metavar="URL",
+        default=None,
+        help="fetch a URL live and parse its 'payment-required' header (for "
+        "one-off verification only)",
+    )
     return parser
 
 
@@ -230,6 +344,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.require_signed:
             policy.require_signed_payload = True
+
+        if (
+            args.payment_required_header is not None
+            or args.payment_required_json is not None
+            or args.fetch_url is not None
+        ):
+            return _run_v2(args, policy)
 
         try:
             request_data = _load_json(args.request, sys.stdin)

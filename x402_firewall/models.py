@@ -24,7 +24,7 @@ class MalformedRequestError(ValueError):
     """Raised when a payment request object is missing/invalid fields."""
 
 
-_REQUIRED_STRING_FIELDS = ("pay_to", "asset", "network", "payee", "nonce", "source_url")
+_REQUIRED_STRING_FIELDS = ("pay_to", "asset", "network", "payee", "source_url")
 
 # An EVM address must look like ``0x`` + 40 hex chars. EIP-55 mixed-case as
 # well as all-lower/all-upper are accepted (checksum is not verified here).
@@ -133,7 +133,8 @@ class PaymentRequest:
         asset: asset id, canonical value "USDC".
         network: network id, canonical value "Base".
         payee: payee identity/name.
-        nonce: one-time nonce.
+        nonce: one-time nonce (optional; None for v2-derived requests, where
+            real replay protection happens on the signed authorization).
         description: merchant-provided description (untrusted text).
         source_url: the URL that issued the 402.
     """
@@ -143,9 +144,9 @@ class PaymentRequest:
     asset: str
     network: str
     payee: str
-    nonce: str
     description: str
     source_url: str
+    nonce: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Any) -> "PaymentRequest":
@@ -163,6 +164,15 @@ class PaymentRequest:
                 )
             if not value.strip():
                 raise MalformedRequestError(f"field '{field}' must be non-empty")
+
+        nonce = data.get("nonce")
+        if nonce is not None:
+            if not isinstance(nonce, str):
+                raise MalformedRequestError(
+                    f"field 'nonce' must be a string, got {type(nonce).__name__}"
+                )
+            if not nonce.strip():
+                raise MalformedRequestError("field 'nonce' must be non-empty")
 
         if "amount" not in data:
             raise MalformedRequestError("missing required field 'amount'")
@@ -190,9 +200,9 @@ class PaymentRequest:
             asset=data["asset"],
             network=data["network"],
             payee=data["payee"],
-            nonce=data["nonce"],
             description=description,
             source_url=data["source_url"],
+            nonce=nonce,
         )
 
 

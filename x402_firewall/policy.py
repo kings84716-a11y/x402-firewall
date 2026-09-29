@@ -310,6 +310,8 @@ def _record_nonce(
     pol: PolicyConfig, store: Optional["Store"], req: PaymentRequest, decision: str
 ) -> None:
     """Record a consumed nonce on an ASK verdict (no spend is added)."""
+    if req.nonce is None:
+        return
     pol.seen_nonces.add(req.nonce)
     if store is not None:
         store.record_nonce(req.nonce, req.pay_to, req.amount, decision)
@@ -375,7 +377,7 @@ def evaluate_payment_request(
         )
 
     # Rule 3: nonce length sanity.
-    if len(req.nonce) > NONCE_MAX_LEN:
+    if req.nonce is not None and len(req.nonce) > NONCE_MAX_LEN:
         return Result(
             Verdict.DENY,
             f"nonce is too long ({len(req.nonce)} chars, max {NONCE_MAX_LEN})",
@@ -443,8 +445,9 @@ def evaluate_payment_request(
         )
 
     # Rule 10: nonce replay (in-memory and/or persistent store).
-    if req.nonce in pol.seen_nonces or (
-        store is not None and store.nonce_seen(req.nonce)
+    if req.nonce is not None and (
+        req.nonce in pol.seen_nonces
+        or (store is not None and store.nonce_seen(req.nonce))
     ):
         return Result(
             Verdict.DENY,
@@ -534,7 +537,8 @@ def evaluate_payment_request(
     else:
         pol._spent_total += req.amount
 
-    pol.seen_nonces.add(req.nonce)
+    if req.nonce is not None:
+        pol.seen_nonces.add(req.nonce)
     return Result(
         Verdict.PAY,
         f"approved payment of {req.amount} USDC on Base to '{req.payee}'",

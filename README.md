@@ -44,6 +44,92 @@ A payment request object:
 | `description` | str      | merchant description (untrusted text)        |
 | `source_url`  | str      | URL that issued the 402                      |
 
+## Real x402 v2 wire format (live `payment-required` parsing)
+
+Real x402 v2 servers (e.g. `agent.massive.com`) return `402 Payment Required`
+with an HTTP header named **`payment-required`** (case-insensitive) whose value
+is **base64-encoded JSON**. The firewall (`x402_firewall.wire`) decodes that
+payload and normalizes it into the internal `PaymentRequest` above. This is
+**parsing + normalization + policy evaluation only** — no signing, no settler,
+no facilitator.
+
+Decoded shape (the genuine Massive capture committed under `examples/`):
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required",
+  "resource": {
+    "url": "https://agent.massive.com/v1/open-close/AAPL/2026-08-14",
+    "description": "Get the open, close and afterhours prices ...",
+    "mimeType": "application/json",
+    "serviceName": "Massive",
+    "tags": ["open-close", "daily", "ohlc", "stocks"],
+    "iconUrl": "https://agent.massive.com/icon.png"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "10000",
+      "payTo": "0x525f6dDcE9aF7a7179D7696aaBfCd5FCd15a21e6",
+      "maxTimeoutSeconds": 60,
+      "extra": {"name": "USD Coin", "version": "2"}
+    }
+  ],
+  "extensions": { "bazaar": { "...": true } }
+}
+```
+
+Key differences from the internal model, normalized by the parser:
+
+- **Header** — `payment-required` (case-insensitive), base64(JSON).
+- **Version** — `x402Version` must be `2`; any other value is rejected with a
+  clear error.
+- **Payment options** — an `accepts` array (a server may list several). Each
+  entry has `scheme`, `network`, `asset`, `amount`, `payTo`,
+  `maxTimeoutSeconds`, optional `extra`.
+- **Network** — a CAIP-2 chain id. `eip155:8453` = Base mainnet,
+  `eip155:84532` = Base Sepolia testnet.
+- **Asset** — a **token contract address**, not a symbol. A built-in table maps
+  the known Base USDC contract to `USDC`/6 decimals:
+
+  | Network (CAIP-2) | USDC contract                              | Symbol | Decimals |
+  |------------------|--------------------------------------------|--------|----------|
+  | `eip155:8453`    | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `USDC` | 6        |
+  | `eip155:84532`   | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `USDC` | 6        |
+
+- **Amount** — a **string of atomic integer units** (no `decimals` field in the
+  payload). `"10000"` at 6 decimals = `0.01` USDC (human amount
+  = `amount_raw / 10**decimals`).
+- **No nonce / payee** — there is no top-level nonce or human payee.
+  `resource.serviceName` becomes `payee`; `resource.description` →
+  `description`; `resource.url` → `source_url`. The normalized request carries
+  `nonce = None` (the firewall does **not** fabricate a nonce — real replay
+  protection happens on the signed authorization later).
+
+The parser exposes:
+
+- `parse_payment_required_header(value)` — base64-decode + JSON-parse a header
+  value.
+- `parse_payment_required_json(data)` — typed parse of an already-decoded object.
+- `select_option(payment_required, desired_network=None)` — pick the first
+  usable `accepts` entry (`scheme == "exact"`, known network + asset).
+- `option_to_request(option, resource)` — convert one option into a
+  `PaymentRequest` (resolving contract → symbol/decimals, computing the human
+  amount).
+- `normalize_v2(payload)` — parse + select + convert in one call.
+- `evaluate_v2_payment_required(payload, policy, expected_amount=None)` —
+  normalize and evaluate against the policy, mapping v2-specific failures to
+  clean `DENY` results:
+  `malformed`, `unsupported_scheme`, `unsupported_asset`, `no_matching_option`.
+
+Only the `exact` scheme is supported today; other schemes (`upto`, batch,
+auth-capture) are future work and are rejected safely with `unsupported_scheme`.
+Unknown asset contracts raise a typed `UnknownAssetError` (never a silent
+assumption about decimals).
+
 ## Policy rules
 
 Rules are evaluated in order; the first hit decides:
@@ -451,6 +537,41 @@ python3 -m x402_firewall --audit --verdict DENY --limit 5 --db /tmp/firewall.db
 python3 -m x402_firewall --request examples/request_ok.json --policy examples/policy.json --db /tmp/firewall.db --log /tmp/audit.jsonl
 ```
 
+### Parsing a real x402 v2 `payment-required` header
+
+Feed a captured header value (base64) or an already-decoded JSON object; the CLI
+prints the **normalized internal request** plus the gate decision and exits with
+the same codes (`PAY` 0 / `DENY` 1 / `ASK` 3 / error 2):
+
+```bash
+# (a) base64 header from a file -> normalized request + PAY
+python3 -m x402_firewall --payment-required-header examples/massive_payment_required.header.txt \
+  --policy examples/massive_policy.json --db :memory:
+# {"decision": "PAY", "normalized_request": {"amount": 0.01, "asset": "USDC",
+#  "network": "Base", "nonce": null, "payee": "Massive", "pay_to": "0x525f...",
+#  "source_url": "https://agent.massive.com/v1/open-close/AAPL/2026-08-14", ...},
+#  "reason": "approved payment of 0.01 USDC on Base to 'Massive'", "rule": "valid"}
+
+# (b) decoded JSON -> same result
+python3 -m x402_firewall --payment-required-json examples/massive_payment_required.json \
+  --policy examples/massive_policy.json --db :memory:
+
+# (c) Massive payTo not whitelisted -> DENY unknown_address (exit 1)
+python3 -m x402_firewall --payment-required-json examples/massive_payment_required.json \
+  --policy examples/policy.json --db :memory:
+
+# (d) over budget (max_amount < 0.01) -> DENY over_budget (exit 1)
+
+# (e) live fetch (one-off verification only) -> parses the real response header
+python3 -m x402_firewall --fetch-url "https://agent.massive.com/v1/open-close/AAPL/2026-08-14" \
+  --policy examples/massive_policy.json --db :memory:
+```
+
+Malformed v2 payloads map to a clean `DENY` (`malformed`) instead of a
+traceback: bad base64, non-object JSON, missing/empty `accepts`, an unsupported
+`x402Version`, a non-numeric/negative `amount`, an unknown asset contract
+(`unsupported_asset`), or a non-`exact` scheme (`unsupported_scheme`).
+
 Options:
 
 - `--request/-r PATH` — request JSON file (default: stdin).
@@ -475,3 +596,9 @@ Options:
 - `--audit` — dump the decision audit trail as JSON and exit (use `--limit N`
   and `--verdict PAY|ASK|DENY` to filter).
 - `--log PATH` — append one JSON line per decision to this file (JSONL).
+- `--payment-required-header PATH` — parse a real x402 v2 `payment-required`
+  header value (base64) from a file (`-` for stdin).
+- `--payment-required-json PATH` — parse an already-decoded v2 payment-required
+  JSON object from a file (`-` for stdin).
+- `--fetch-url URL` — fetch a URL live and parse its `payment-required` header
+  (one-off verification only; not for routine use).
