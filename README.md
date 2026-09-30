@@ -658,27 +658,31 @@ EIP-3009 settlement is gasless for the payer.)
 `integration/live.py` starts a local x402 resource server (Base Sepolia USDC,
 `exact` scheme), fetches the real `402`, parses it with `x402_firewall.wire`,
 gates it with `guard_payment`, then (only when allowed) signs EIP-3009 via the
-SDK and calls the free facilitator at `https://x402.org/facilitator`. It prints
-the account + balances, the parsed 402, the gate decision, the facilitator
-verify/settle responses, the tx hash, and the explorer URL.
+SDK and calls the free facilitator at `https://x402.org/facilitator`. On a
+successful `/settle` it calls `Local402Server.mark_paid()`, which flips the local
+server's paid flag (synced to the handler's HTTP server) so the same URL then
+serves `200` with the resource JSON; this is reported as
+`resource_after_payment.status`. It also prints the account + balances, the
+parsed 402, the gate decision, the facilitator verify/settle responses, the tx
+hash, and the explorer URL.
 
 ### Offline wiring tests
 
 `tests/test_testnet_wiring.py` (stdlib-only, no SDK, no funds) asserts the
 wiring with a fake signer/facilitator: DENY → signer never invoked; PAY → signer
 invoked exactly once with the selected v2 option; ASK → no sign until approved.
+`tests/test_local_server.py` (stdlib-only) asserts the offline `402 → mark_paid →
+200` contract: `Local402Server` returns `402` until `mark_paid()`, then `200`
+with the resource JSON.
 
 ```bash
-python3 -m unittest discover -s tests   # 148 tests: 142 core + 6 wiring
+python3 -m unittest discover -s tests   # 150 tests
 ```
 
-### Status (2026-09-29)
+### Status (2026-09-30)
 
-The full loop is wired and verified live up to the funding boundary: a real
-402 was parsed, gated to `PAY`, a real EIP-3009 signature was produced with the
-throwaway EOA and accepted by the facilitator's `/verify` signature check, which
-then returned `is_valid: false` with reason
-`invalid_exact_evm_insufficient_balance` (`ERC20: transfer amount exceeds
-balance`) because the account holds **0 test USDC**. Funding requires the
-human-driven Circle faucet; once funded, re-running `integration.live` completes
-`/settle` and emits a verifiable Base Sepolia tx hash.
+The full loop is verified live end-to-end on Base Sepolia: a real `402` was
+parsed, gated to `PAY`, a real EIP-3009 signature was produced and accepted by
+the free facilitator's `/verify`, `/settle` succeeded with a real testnet tx
+hash, and the resource re-fetch after settlement returned `200`
+(`resource_after_payment.status = 200`).

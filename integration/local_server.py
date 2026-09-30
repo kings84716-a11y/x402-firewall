@@ -111,6 +111,8 @@ class Local402Server:
 
     def mark_paid(self) -> None:
         self.paid = True
+        if self._httpd is not None:
+            self._httpd.paid = True
 
     def stop(self) -> None:
         if self._httpd is not None:
